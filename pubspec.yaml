@@ -1,0 +1,16 @@
+name: expense_tracker
+description: Airtable expense tracker with receipt capture
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^0.13.5
+  image_picker: ^0.8.7
+  intl: ^0.18.1
+  # Removed firebase_storage - using Airtable direct upload instead
+
+flutter:
+  uses-material-design: true

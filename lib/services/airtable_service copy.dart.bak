@@ -1,0 +1,92 @@
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+
+class AirtableService {
+  static const String _baseId = 'applG9kbUJHfNL8cv';
+  static const String _personalAccessToken = 'patFGIGa2OwgN8bkH.d175e49fdbf537d52c8a6440e155a34a34c9ed68887cc3b3176487d7e008c5a3';
+
+  Future<List<String>> getVendors() async {
+    try {
+      final response = await http.get(
+        Uri.parse('https://api.airtable.com/v0/$_baseId/Vendors'),
+        headers: {'Authorization': 'Bearer $_personalAccessToken'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final records = data['records'] as List? ?? [];
+        
+        return records.map((record) {
+          final fields = record['fields'] as Map<String, dynamic>? ?? {};
+          return fields['Vendor Name']?.toString().trim() ?? 'Unknown Vendor';
+        }).where((name) => name.isNotEmpty).toList();
+      }
+      throw Exception('Failed to load vendors: ${response.statusCode}');
+    } catch (e) {
+      if (kDebugMode) print('Vendor Load Error: $e');
+      return [];
+    }
+  }
+
+  Future<List<String>> getCategories() async {
+    try {
+      final response = await http.get(
+        Uri.parse('https://api.airtable.com/v0/$_baseId/Categories'),
+        headers: {'Authorization': 'Bearer $_personalAccessToken'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final records = data['records'] as List? ?? [];
+        
+        return records.map((record) {
+          final fields = record['fields'] as Map<String, dynamic>? ?? {};
+          return fields['Categories']?.toString().trim() ?? 'Uncategorized';
+        }).where((name) => name.isNotEmpty).toList();
+      }
+      throw Exception('Failed to load categories: ${response.statusCode}');
+    } catch (e) {
+      if (kDebugMode) print('Categories Load Error: $e');
+      return [];
+    }
+  }
+
+  Future<bool> submitExpense(Map<String, dynamic> fields) async {
+  try {
+    // Prepare the receipt attachment
+    final receipt = fields['Receipt'] as List;
+    
+    // Format the request body according to Airtable's requirements
+    final requestBody = {
+      "fields": {
+        "Date": fields['Date'],
+        "Vendor/Supplier": fields['Vendor/Supplier'],
+        "Category": fields['Categories'],
+        "Amount": fields['Amount'],
+        "Payment Method": fields['Payment Method'],
+        "Photo": receipt, // Already formatted correctly
+      }
+    };
+
+    final response = await http.post(
+      Uri.parse('https://api.airtable.com/v0/$_baseId/Expenses'),
+      headers: {
+        'Authorization': 'Bearer $_personalAccessToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(requestBody),
+    );
+
+    if (response.statusCode == 200) {
+      return true;
+    } else {
+      debugPrint('Submission Failed: ${response.statusCode} ${response.body}');
+      return false;
+    }
+  } catch (e) {
+    debugPrint('Submission Error: $e');
+    return false;
+  }
+}
+}

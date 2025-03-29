@@ -1,0 +1,471 @@
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' as http;
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'services/airtable_service.dart';
+
+void main() {
+  runApp(const ExpenseTrackerApp());
+}
+
+class ExpenseTrackerApp extends StatelessWidget {
+  const ExpenseTrackerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Expense Tracker',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        inputDecorationTheme: const InputDecorationTheme(
+          border: OutlineInputBorder(),
+          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        ),
+      ),
+      home: const ExpenseFormScreen(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class ExpenseFormScreen extends StatefulWidget {
+  const ExpenseFormScreen({super.key});
+
+  @override
+  State<ExpenseFormScreen> createState() => _ExpenseFormScreenState();
+}
+
+class _ExpenseFormScreenState extends State<ExpenseFormScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _amountController = TextEditingController();
+  final AirtableService _airtableService = AirtableService();
+  
+  File? _receiptImage;
+  Uint8List? _imageBytes;
+  DateTime _selectedDate = DateTime.now();
+  String? _selectedVendor;
+  String? _selectedCategory;
+  String _paymentMethod = 'Efectivo';
+  List<String> _vendors = [];
+  List<String> _categories = [];
+  bool _isLoading = true;
+  bool _isSubmitting = false;
+  bool _hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadInitialData();
+  }
+
+  Future<void> _loadInitialData() async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _hasError = false;
+      });
+
+      final vendors = await _airtableService.getVendors();
+      final categories = await _airtableService.getCategories();
+
+      // Remove duplicates and empty values
+      final cleanVendors = vendors.where((v) => v.isNotEmpty).toSet().toList();
+      final cleanCategories = categories.where((c) => c.isNotEmpty).toSet().toList();
+
+      // Provide fallback if empty
+      if (cleanVendors.isEmpty) cleanVendors.add('Default Vendor');
+      if (cleanCategories.isEmpty) {
+        cleanCategories.addAll(['Supplies', 'Food', 'Taxes']);
+      }
+
+      if (mounted) {
+        setState(() {
+          _vendors = cleanVendors;
+          _categories = cleanCategories;
+          _selectedVendor = cleanVendors.first;
+          _selectedCategory = cleanCategories.first;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _hasError = true;
+        });
+        _showErrorSnackbar('Failed to load data. Pull down to refresh.');
+      }
+    }
+  }
+
+  Future<void> _selectDate(BuildContext context) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+
+    if (picked != null && picked != _selectedDate && mounted) {
+      setState(() => _selectedDate = picked);
+    }
+  }
+
+  Future<void> _takePhoto() async {
+    try {
+      final pickedFile = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        preferredCameraDevice: CameraDevice.rear,
+        maxWidth: 1800,
+        maxHeight: 1800,
+        imageQuality: 85,
+      );
+
+      if (pickedFile != null) {
+        final bytes = await pickedFile.readAsBytes();
+        setState(() {
+          _imageBytes = bytes;
+          if (!kIsWeb) {
+            _receiptImage = File(pickedFile.path);
+          }
+        });
+      }
+    } catch (e) {
+      _showErrorSnackbar('Camera error: ${e.toString()}');
+    }
+  }
+
+  Widget _buildImagePreview() {
+    if (_imageBytes == null && _receiptImage == null) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: const [
+          Icon(Icons.camera_alt, size: 50),
+          SizedBox(height: 8),
+          Text('Tap to take photo'),
+        ],
+      );
+    }
+
+    return kIsWeb
+        ? Image.memory(_imageBytes!, fit: BoxFit.cover)
+        : Image.file(_receiptImage!, fit: BoxFit.cover);
+  }
+
+  Future<void> _submitExpense() async {
+    if (!_formKey.currentState!.validate()) return;
+    if (_imageBytes == null && _receiptImage == null) {
+      _showErrorSnackbar('Please take a receipt photo');
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      final base64Image = kIsWeb
+          ? base64Encode(_imageBytes!)
+          : base64Encode(await _receiptImage!.readAsBytes());
+
+      final success = await _airtableService.submitExpense({
+        'Date': _formatDate(_selectedDate),
+        'Vendor/Supplier': _selectedVendor ?? 'Unknown',
+        'Category': _selectedCategory ?? 'Uncategorized',
+        'Amount': double.tryParse(_amountController.text) ?? 0.0,
+        'Payment Method': _paymentMethod,
+        'Receipt': [{
+          'url': 'data:image/jpeg;base64,$base64Image',
+          'filename': 'receipt_${DateTime.now().millisecondsSinceEpoch}.jpg'
+        }]
+      });
+
+      if (success && mounted) {
+        _showSuccessSnackbar('Expense submitted successfully!');
+        _resetForm();
+      } else if (mounted) {
+        _showErrorSnackbar('Failed to submit expense');
+      }
+    } catch (e) {
+      if (mounted) {
+        _showErrorSnackbar('Error: ${e.toString()}');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  String _formatDate(DateTime date) {
+    return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+  }
+
+  void _resetForm() {
+    _formKey.currentState?.reset();
+    if (mounted) {
+      setState(() {
+        _receiptImage = null;
+        _imageBytes = null;
+        _selectedDate = DateTime.now();
+        _selectedVendor = _vendors.isNotEmpty ? _vendors.first : null;
+        _selectedCategory = _categories.isNotEmpty ? _categories.first : null;
+        _paymentMethod = 'Efectivo';
+      });
+    }
+    _amountController.clear();
+  }
+
+  void _showErrorSnackbar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 4),
+      )
+    );
+  }
+
+  void _showSuccessSnackbar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 2),
+      )
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Loading vendors and categories...'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('New Expense'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadInitialData,
+            tooltip: 'Reload data',
+          ),
+        ],
+      ),
+      body: _hasError
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text('Failed to load data', style: TextStyle(fontSize: 18)),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _loadInitialData,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            )
+          : GestureDetector(
+              onTap: () => FocusScope.of(context).unfocus(),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Form(
+                  key: _formKey,
+                  child: ListView(
+                    children: [
+                      // Date Picker
+                      Card(
+                        child: ListTile(
+                          leading: const Icon(Icons.calendar_today),
+                          title: const Text('Date'),
+                          subtitle: Text(
+                            _formatDate(_selectedDate),
+                            style: const TextStyle(fontSize: 16),
+                          ),
+                          trailing: const Icon(Icons.arrow_drop_down),
+                          onTap: () => _selectDate(context),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+
+                      // Vendor Dropdown
+                      DropdownButtonFormField<String>(
+                        value: _selectedVendor,
+                        items: _vendors
+                            .map((vendor) => DropdownMenuItem<String>(
+                                  value: vendor,
+                                  child: Text(vendor),
+                                ))
+                            .toList(),
+                        onChanged: (value) => setState(() => _selectedVendor = value),
+                        validator: (value) => value == null ? 'Please select a vendor' : null,
+                        decoration: const InputDecoration(
+                          labelText: 'Vendor/Supplier',
+                          prefixIcon: Icon(Icons.store),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Category Dropdown
+                      DropdownButtonFormField<String>(
+                        value: _selectedCategory,
+                        items: _categories
+                            .map((category) => DropdownMenuItem<String>(
+                                  value: category,
+                                  child: Text(category),
+                                ))
+                            .toList(),
+                        onChanged: (value) => setState(() => _selectedCategory = value),
+                        validator: (value) => value == null ? 'Please select a category' : null,
+                        decoration: const InputDecoration(
+                          labelText: 'Category',
+                          prefixIcon: Icon(Icons.category),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Amount Input
+                      TextFormField(
+                        controller: _amountController,
+                        decoration: const InputDecoration(
+                          labelText: 'Amount',
+                          prefixIcon: Icon(Icons.attach_money),
+                          prefixText: '\$ ',
+                        ),
+                        keyboardType: TextInputType.numberWithOptions(decimal: true),
+                        validator: (value) {
+                          if (value == null || value.isEmpty) return 'Required';
+                          if (double.tryParse(value) == null) return 'Invalid amount';
+                          if (double.parse(value) <= 0) return 'Must be greater than 0';
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Payment Method
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Payment Method',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: ChoiceChip(
+                                  label: const Text('Efectivo'),
+                                  selected: _paymentMethod == 'Efectivo',
+                                  onSelected: (selected) {
+                                    if (selected) {
+                                      setState(() => _paymentMethod = 'Efectivo');
+                                    }
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: ChoiceChip(
+                                  label: const Text('Tarjeta'),
+                                  selected: _paymentMethod == 'Tarjeta',
+                                  onSelected: (selected) {
+                                    if (selected) {
+                                      setState(() => _paymentMethod = 'Tarjeta');
+                                    }
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: ChoiceChip(
+                                  label: const Text('Transferencia'),
+                                  selected: _paymentMethod == 'Transferencia',
+                                  onSelected: (selected) {
+                                    if (selected) {
+                                      setState(() => _paymentMethod = 'Transferencia');
+                                    }
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+
+                      // Receipt Photo
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Receipt Photo',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 8),
+                          GestureDetector(
+                            onTap: _takePhoto,
+                            child: Container(
+                              height: 200,
+                              decoration: BoxDecoration(
+                                color: Colors.grey[200],
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.grey),
+                              ),
+                              child: _buildImagePreview(),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 32),
+
+                      // Submit Button
+                      ElevatedButton(
+                        onPressed: _isSubmitting ? null : _submitExpense,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          backgroundColor: Colors.blue,
+                          foregroundColor: Colors.white,
+                        ),
+                        child: _isSubmitting
+                            ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 3,
+                                ),
+                              )
+                            : const Text(
+                                'SUBMIT EXPENSE',
+                                style: TextStyle(fontSize: 18),
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _amountController.dispose();
+    super.dispose();
+  }
+}
